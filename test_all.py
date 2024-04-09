@@ -16,7 +16,7 @@ from mpl_toolkits.mplot3d import axes3d
 # import sys
 # sys.path.append('..')
 
-from fno_1d impor *
+from fno_1d impot *
 
 # from ..src import jacobian
 
@@ -176,12 +176,21 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     min_relative_error = 1000000
     for i in range(epochs):
         model.train()
-        if (ds_name == "baker") or (ds_name == "tilted_tent_map") or (ds_name == "pinched_tent_map") or (ds_name == "plucked_tent_map"):
-            y_pred = model(X).to(device)
-        else: 
-            y_pred = torchdiffeq.odeint(model, X_train, t_eval_point, method="rk4")[-1].to(device)
+        y_pred = torch.zeros(int(num_train/batch_size), batch_size, dim)
+        y_true = torch.zeros(int(num_train/batch_size), batch_size, dim)
+
+        batch_idx = 0
+        for batch_start in range(0, num_train, batch_size):
+            batch_end = min(batch_start + batch_size, num_train)
+            # print("batch_start: ", batch_start, batch_end)
+            X_batch = X[batch_start:batch_end]
+            Y_batch = Y[batch_start:batch_end]
+            y_pred[batch_idx] = torchdiffeq.odeint(model, X_batch, t_eval_point, method="rk4")[-1].to(device)
+            y_true[batch_idx]  = Y_batch
+            batch_idx += 1
+        
         optimizer.zero_grad()
-        train_loss = criterion(y_pred, Y_train)  * (1/time_step/time_step)
+        train_loss = criterion(y_pred, y_true) * (1 / time_step / time_step)
 
         if loss_type == "Jacobian":
             # Compute Jacobian
