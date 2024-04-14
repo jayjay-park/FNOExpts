@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# import torch.autograd.functional as F
 import torch.optim as optim
 import torchdiffeq
 import datetime
@@ -15,7 +14,6 @@ from functools import reduce
 import operator
 from matplotlib.pyplot import *
 from mpl_toolkits.mplot3d import axes3d
-from Adam import Adam
 
 
 ########################
@@ -138,10 +136,10 @@ class FNO1d(nn.Module):
         x = x1 + x2
         x = F.gelu(x)
 
-        # x1 = self.conv2(x)
-        # x2 = self.w2(x)
-        # x = x1 + x2
-        # x = F.gelu(x)
+        x1 = self.conv2(x)
+        x2 = self.w2(x)
+        x = x1 + x2
+        x = F.gelu(x)
 
         x1 = self.conv3(x)
         x2 = self.w3(x)
@@ -221,16 +219,17 @@ def update_lr(optimizer, epoch, total_e, origin_lr):
         params['lr'] = new_lr
     return
 
-def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size=20):
+def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size=10):
 
     print('cuda', torch.cuda.is_available())
     print('memory', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+    torch.autograd.set_detect_anomaly(True)
 
     # Initialize
-    n_store, k  = 100, 0
+    n_store, k  = 10, 0
     ep_num, loss_hist, test_loss_hist = torch.empty(n_store+1,dtype=int), torch.empty(n_store+1), torch.empty(n_store+1)
-    # optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     X_train, Y_train, X_val, Y_val, X_test, Y_test = dataset
     X_train, Y_train, X_val, Y_val, X_test, Y_test = X_train.to(device), Y_train.to(device), X_val.to(device), Y_val.to(device), X_test.to(device), Y_test.to(device)
     num_train, num_test = X_train.shape[0], X_test.shape[0]
@@ -246,45 +245,30 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     y_test = Y_test.reshape(num_test,dim,1)
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
-    
-    # Compute True Jacobian
-    if loss_type == "Jacobian":
-        jac_diff_train, jac_diff_test = torch.empty(n_store+1), torch.empty(n_store+1)
-        print("Jacobian loss!")
-        f = lambda x: dyn_sys(0, x)
-        true_jac_fn = torch.vmap(torch.func.jacrev(f))
-        True_J = true_jac_fn(X_train)
-        Test_J = true_jac_fn(X_test)
 
     # Training Loop
     min_relative_error = 1000000
-    y_pred = torch.zeros(int(num_train/batch_size), batch_size, dim)
-    y_true = torch.zeros(int(num_train/batch_size), batch_size, dim)
+    # y_pred = torch.zeros(int(num_train/batch_size), batch_size, dim)
+    # y_true = torch.zeros(int(num_train/batch_size), batch_size, dim)
 
     for i in range(epochs):
         model.train()
         batch_idx = 0
+        full_train_loss = 0
 
         for x, y in train_loader:
             # print("x_shpae", x.shape)
-            y_pred[batch_idx] = model(x).cuda().squeeze()
-            y_true[batch_idx] = y.squeeze()
-            batch_idx += 1
+            y_pred = model(x).cuda().view(batch_size, -1)
+            y_true = y.view(batch_size, -1)
+            # batch_idx += 1
             
-        optimizer.zero_grad()
-        train_loss = criterion(y_pred.view(batch_size, -1), y_true.view(batch_size, -1))  * (1/time_step/time_step)
-
-        if loss_type == "Jacobian":
-            # Compute Jacobian
-            jacrev = torch.func.jacrev(model, argnums=1)
-            compute_batch_jac = torch.vmap(jacrev, in_dims=(None, 0), chunk_size=1000)
-            cur_model_J = compute_batch_jac(0, X_train).to(device)
-            jac_norm_diff = criterion(True_J, cur_model_J)
-            train_loss += reg_param*jac_norm_diff
-
-        train_loss.backward(retain_graph=True)
-        optimizer.step()
+            optimizer.zero_grad()
+            train_loss = criterion(y_pred, y_true)  * (1/time_step/time_step)
+            train_loss.backward()
+            optimizer.step()
+            full_train_loss += train_loss.item()/len(train_loader)
         update_lr(optimizer, i, epochs, args.lr)
+        print(i, full_train_loss)
 
         # Save Training and Test History
         if i % (epochs//n_store) == 0 or (i == epochs-1):
@@ -302,15 +286,15 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
                 # current_relative_error = calculate_relative_error(model, dyn_sys_info[0], device)
                 # Check if current model has the lowest relative error so far
                 test_loss = criterion(y_pred_test.view(batch_size, -1), y_true_test.view(batch_size, -1)) * (1/time_step/time_step)
-                '''if test_loss < min_relative_error:
+                if test_loss < min_relative_error:
                     min_relative_error = test_loss
                     # Save the model
                     torch.save(model.state_dict(), f"{args.train_dir}/best_model.pth")
-                    logger.info(f"Epoch {i}: New minimal relative error: {min_relative_error:.2f}%, model saved.")'''
+                    logger.info(f"Epoch {i}: New minimal relative error: {min_relative_error:.2f}%, model saved.")
 
                 # save predicted node feature for analysis            
-                logger.info("Epoch: %d Train: %.5f Test: %.5f", i, train_loss.item(), test_loss.item())
-                ep_num[k], loss_hist[k], test_loss_hist[k] = i, train_loss.item(), test_loss.item()
+                logger.info("Epoch: %d Train: %.5f Test: %.5f", i, full_train_loss, test_loss.item())
+                ep_num[k], loss_hist[k], test_loss_hist[k] = i, full_train_loss, test_loss.item()
 
                 if loss_type == "Jacobian":
                     test_model_J = compute_batch_jac(0, X_test).to(device)
@@ -318,7 +302,7 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
                     jac_diff_train[k], jac_diff_test[k] = jac_norm_diff, test_jac_norm_diff
                     JAC_plot_path = f'{args.train_dir}JAC_'+str(i)+'.jpg'
                     # JAC_plot_path = f'../plot/Vector_field/train_{model_type}_{dyn_sys_type}/JAC_'+str(i)+'.jpg'
-                    plot_vector_field(model, path=JAC_plot_path, idx=1, t=0., N=100, device='cuda')
+                    # plot_vector_field(model, path=JAC_plot_path, idx=1, t=0., N=100, device='cuda')
 
                 k = k + 1
 
@@ -328,14 +312,14 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     else:
         MSE_plot_path = f'{args.train_dir}MSE_'+str(i)+'.jpg'
         # MSE_plot_path = f'../plot/Vector_field/train_{model_type}_{dyn_sys_type}/MSE_'+str(i)+'.jpg'
-        plot_vector_field(model, path=MSE_plot_path, idx=1, t=0., N=100, device='cuda')
+        # plot_vector_field(model, path=MSE_plot_path, idx=1, t=0., N=100, device='cuda')
         jac_diff_train, jac_diff_test = None, None
     # Load the best relative error model
     best_model = model
     best_model.load_state_dict(torch.load(f"{args.train_dir}/best_model.pth"))
     best_model.eval()
     RE_plot_path = f'{args.train_dir}minRE.jpg'
-    plot_vector_field(best_model, path=RE_plot_path, idx=1, t=0., N=100, device='cuda')
+    # plot_vector_field(best_model, path=RE_plot_path, idx=1, t=0., N=100, device='cuda')
     return ep_num, loss_hist, test_loss_hist, jac_diff_train, jac_diff_test, Y_test
 
 
@@ -514,12 +498,22 @@ def rk4(x, f, dt):
     k4 = f(0, x + dt*k3)
     return x + dt/6*(k1 + 2*k2 + 2*k3 + k4)
     
-def lyap_exps(dyn_sys_info, traj, iters):
+def lyap_exps(dyn_sys_info, traj, iters, batch_size=10):
     model, dim, time_step = dyn_sys_info
     LE = torch.zeros(dim).to(device)
     traj_gpu = traj.to(device)
-    f = lambda x: rk4(x, model, time_step)
-    Jac = torch.vmap(torch.func.jacrev(f))(traj_gpu)
+    if model == lorenz:
+        f = lambda x: rk4(x, model, time_step)
+        Jac = torch.vmap(torch.func.jacrev(f))(traj_gpu)
+    else:
+        f = model
+        traj_in_batch = traj_gpu.reshape(-1, batch_size, dim, 1)
+        print("shape", traj_in_batch.shape)
+        Jac = torch.randn(traj_gpu.shape[0], dim, dim)
+        for i in range(traj_in_batch.shape[0]):
+            res = torch.func.jacrev(f)(traj_in_batch[i])
+            print(res, res.shape)
+            Jac[i:i+batch_size-1] = res
     Q = torch.rand(dim,dim).to(device)
     eye_cuda = torch.eye(dim).to(device)
     for i in range(iters):
@@ -543,8 +537,8 @@ if __name__ == '__main__':
     parser.add_argument("--time_step", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--num_epoch", type=int, default=1000)
-    parser.add_argument("--num_train", type=int, default=1000)
+    parser.add_argument("--num_epoch", type=int, default=10)
+    parser.add_argument("--num_train", type=int, default=3000)
     parser.add_argument("--num_test", type=int, default=1000)
     parser.add_argument("--num_val", type=int, default=0)
     parser.add_argument("--num_trans", type=int, default=0)
@@ -578,7 +572,7 @@ if __name__ == '__main__':
     dataset = create_data(dyn_sys_info, n_train=args.num_train, n_test=args.num_test, n_trans=args.num_trans, n_val=args.num_val)
 
     # Create model
-    m = FNO1d(modes=2, width=8).cuda()
+    m = FNO1d(modes=2, width=32).cuda()
     print("num_param", count_params(m))
 
     print("Training...") # Train the model, return node
@@ -598,13 +592,14 @@ if __name__ == '__main__':
         plot_loss(epochs, abs(loss_hist - args.reg_param*jac_train_hist)*(args.time_step)**2, abs(test_loss_hist - args.reg_param*jac_test_hist)*(args.time_step)**2, mse_loss_path) 
 
     # Plot vector field & phase space
-    percentage_err = plot_vf_err(m, dyn_sys_info, args.model_type, args.loss_type)
-    plot_vf_err_test(m, Y_test, dyn_sys_info, args.model_type, args.loss_type)
-    plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
-    plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
-    plot_attractor(m, dyn_sys_info, 50, phase_path)
+    # percentage_err = plot_vf_err(m, dyn_sys_info, args.model_type, args.loss_type)
+    # plot_vf_err_test(m, Y_test, dyn_sys_info, args.model_type, args.loss_type)
+    # plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
+    # plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
+    # plot_attractor(m, dyn_sys_info, 50, phase_path)
 
     # compute LE
+    init = torch.randn(dim)
     true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 300, args.time_step), method='rk4', rtol=1e-8)
     print("Computing LEs of NN...")
     learned_LE = lyap_exps([m, dim, args.time_step], true_traj, 30000).detach().cpu().numpy()
