@@ -31,3 +31,7 @@ Epoch 8: New minimal relative error: 103.33%, model saved.
 Epoch: 8 Train: 220.97087 Test: 103.32710
 Epoch 9: New minimal relative error: 100.88%, model saved.
 Epoch: 9 Train: 196.72102 Test: 100.88145
+Training Loss: tensor(3.6013e-43)
+Test Loss: tensor(0.0028)
+Learned LE: [ 4.9622135  -0.47029364 -2.6891062 ]
+True LE: [ 8.73399436e-01  9.15853493e-03 -1.45586405e+01]
