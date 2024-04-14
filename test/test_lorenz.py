@@ -219,7 +219,7 @@ def update_lr(optimizer, epoch, total_e, origin_lr):
         params['lr'] = new_lr
     return
 
-def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size=10):
+def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size):
 
     print('cuda', torch.cuda.is_available())
     print('memory', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
@@ -248,8 +248,6 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
 
     # Training Loop
     min_relative_error = 1000000
-    # y_pred = torch.zeros(int(num_train/batch_size), batch_size, dim)
-    # y_true = torch.zeros(int(num_train/batch_size), batch_size, dim)
 
     for i in range(epochs):
         model.train()
@@ -504,7 +502,7 @@ def rk4(x, f, dt):
     k4 = f(0, x + dt*k3)
     return x + dt/6*(k1 + 2*k2 + 2*k3 + k4)
     
-def lyap_exps(dyn_sys_info, traj, iters, batch_size=1):
+def lyap_exps(dyn_sys_info, traj, iters):
     model, dim, time_step = dyn_sys_info
     LE = torch.zeros(dim).to(device)
     traj_gpu = traj.to(device)
@@ -513,7 +511,7 @@ def lyap_exps(dyn_sys_info, traj, iters, batch_size=1):
         Jac = torch.vmap(torch.func.jacrev(f))(traj_gpu)
     else:
         f = model
-        traj_in_batch = traj_gpu.reshape(-1, batch_size, dim, 1)
+        traj_in_batch = traj_gpu.reshape(-1, 1, dim, 1)
         print("shape", traj_in_batch.shape)
         Jac = torch.randn(traj_gpu.shape[0], dim, dim).cuda()
         for j in range(traj_in_batch.shape[0]):
@@ -544,15 +542,16 @@ if __name__ == '__main__':
     parser.add_argument("--time_step", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--num_epoch", type=int, default=800)
-    parser.add_argument("--num_train", type=int, default=4000)
-    parser.add_argument("--num_test", type=int, default=4000)
+    parser.add_argument("--num_epoch", type=int, default=1000)
+    parser.add_argument("--num_train", type=int, default=2000)
+    parser.add_argument("--num_test", type=int, default=2000)
     parser.add_argument("--num_val", type=int, default=0)
     parser.add_argument("--num_trans", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=200)
     parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE"])
     parser.add_argument("--dyn_sys", default="lorenz", choices=["lorenz", "rossler"])
     parser.add_argument("--model_type", default="MLP_skip", choices=["MLP","MLP_skip", "CNN", "HigherDimCNN", "GRU"])
-    parser.add_argument("--n_hidden", type=int, default=256)
+    parser.add_argument("--n_hidden", type=int, default=128)
     parser.add_argument("--n_layers", type=int, default=3)
     parser.add_argument("--reg_param", type=float, default=500)
     parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
@@ -579,11 +578,11 @@ if __name__ == '__main__':
     dataset = create_data(dyn_sys_info, n_train=args.num_train, n_test=args.num_test, n_trans=args.num_trans, n_val=args.num_val)
 
     # Create model
-    m = FNO1d(modes=2, width=32).cuda()
+    m = FNO1d(modes=2, width=args.n_hidden).cuda()
     print("num_param", count_params(m))
 
     print("Training...") # Train the model, return node
-    epochs, loss_hist, test_loss_hist, jac_train_hist, jac_test_hist, Y_test = train(dyn_sys_info, m, device, dataset, args.optim_name, criterion, args.num_epoch, args.lr, args.weight_decay, args.reg_param, args.loss_type, args.model_type)
+    epochs, loss_hist, test_loss_hist, jac_train_hist, jac_test_hist, Y_test = train(dyn_sys_info, m, device, dataset, args.optim_name, criterion, args.num_epoch, args.lr, args.weight_decay, args.reg_param, args.loss_type, args.model_type, args.batch_size)
 
     # Plot Loss
     loss_path = f"../plot/Loss/{args.dyn_sys}/{args.model_type}_{args.loss_type}_Total_{start_time}.png"

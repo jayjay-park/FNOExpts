@@ -9,7 +9,7 @@ num_trans: 0
 loss_type: MSE
 dyn_sys: lorenz
 model_type: MLP_skip
-n_hidden: 256
+n_hidden: 32
 n_layers: 3
 reg_param: 500
 optim_name: AdamW
