@@ -257,15 +257,14 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
         full_train_loss = 0
 
         for x, y in train_loader:
-            # print("x_shpae", x.shape)
             y_pred = model(x).cuda().view(batch_size, -1)
             y_true = y.view(batch_size, -1)
-            # batch_idx += 1
             
             optimizer.zero_grad()
             train_loss = criterion(y_pred, y_true)  * (1/time_step/time_step)
             train_loss.backward()
             optimizer.step()
+            print("len of train_loader", len(train_loader))
             full_train_loss += train_loss.item()/len(train_loader)
         update_lr(optimizer, i, epochs, args.lr)
         print(i, full_train_loss)
@@ -498,7 +497,7 @@ def rk4(x, f, dt):
     k4 = f(0, x + dt*k3)
     return x + dt/6*(k1 + 2*k2 + 2*k3 + k4)
     
-def lyap_exps(dyn_sys_info, traj, iters, batch_size=10):
+def lyap_exps(dyn_sys_info, traj, iters, batch_size=1):
     model, dim, time_step = dyn_sys_info
     LE = torch.zeros(dim).to(device)
     traj_gpu = traj.to(device)
@@ -509,11 +508,12 @@ def lyap_exps(dyn_sys_info, traj, iters, batch_size=10):
         f = model
         traj_in_batch = traj_gpu.reshape(-1, batch_size, dim, 1)
         print("shape", traj_in_batch.shape)
-        Jac = torch.randn(traj_gpu.shape[0], dim, dim)
-        for i in range(traj_in_batch.shape[0]):
-            res = torch.func.jacrev(f)(traj_in_batch[i])
-            print(res, res.shape)
-            Jac[i:i+batch_size-1] = res
+        Jac = torch.randn(traj_gpu.shape[0], dim, dim).cuda()
+        for j in range(traj_in_batch.shape[0]):
+            Jac[j] = torch.autograd.functional.jacobian(f, traj_in_batch[j]).squeeze()
+        # Not possible due to inplace arithmatic in line 82
+        # Jac = torch.vmap(torch.func.jacrev(f))(traj_in_batch)
+
     Q = torch.rand(dim,dim).to(device)
     eye_cuda = torch.eye(dim).to(device)
     for i in range(iters):
@@ -609,9 +609,10 @@ if __name__ == '__main__':
 
     logger.info("%s: %s", "Training Loss", str(loss_hist[-1]))
     logger.info("%s: %s", "Test Loss", str(test_loss_hist[-1]))
-    logger.info("%s: %s", "Jacobian term Training Loss", str(jac_train_hist[-1]))
-    logger.info("%s: %s", "Jacobian term Test Loss", str(jac_test_hist[-1]))
+    if args.loss_type == "Jacobian":
+        logger.info("%s: %s", "Jacobian term Training Loss", str(jac_train_hist[-1]))
+        logger.info("%s: %s", "Jacobian term Test Loss", str(jac_test_hist[-1]))
     logger.info("%s: %s", "Learned LE", str(learned_LE))
     logger.info("%s: %s", "True LE", str(True_LE))
-    logger.info("%s: %s", "Relative Error", str(percentage_err))
+    # logger.info("%s: %s", "Relative Error", str(percentage_err))
     print("Learned:", learned_LE, "\n", "True:", True_LE)

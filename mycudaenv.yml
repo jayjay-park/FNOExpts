@@ -1,0 +1,4 @@
+name: mycudaenv
+channels:
+  - defaults
+prefix: /storage/coda1/p-nisha3/0/jpark3141/miniconda3/envs/mycudaenv
