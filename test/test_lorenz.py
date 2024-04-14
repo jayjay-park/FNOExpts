@@ -343,7 +343,15 @@ def plot_attractor(model, dyn_info, time, path):
     dyn, dim, time_step = dyn_info
     tran_orbit = torchdiffeq.odeint(dyn, torch.randn(dim), torch.arange(0, 5, time_step), method='rk4', rtol=1e-8)
     true_o = torchdiffeq.odeint(dyn, tran_orbit[-1], torch.arange(0, time, time_step), method='rk4', rtol=1e-8)
-    learned_o = torchdiffeq.odeint(model.eval().to(device), tran_orbit[-1].to(device), torch.arange(0, time, time_step), method="rk4", rtol=1e-8).detach().cpu().numpy()
+    # learned_o = torchdiffeq.odeint(model.eval().to(device), tran_orbit[-1].to(device), torch.arange(0, time, time_step), method="rk4", rtol=1e-8).detach().cpu().numpy()
+
+    learned_o = torch.zeros(time*int(1/time_step), dim)
+    x0 = tran_orbit[-1]
+    for t in range(time*int(1/time_step)):
+        learned_o[t] = x0
+        new_x = model(x0.reshape(1, dim, 1).cuda())
+        x0 = new_x.squeeze()
+    learned_o = learned_o.detach().cpu().numpy()
 
     # create plot of attractor with initial point starting from 
     fig, axs = subplots(2, 3, figsize=(24,12))
@@ -536,7 +544,7 @@ if __name__ == '__main__':
     parser.add_argument("--time_step", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--num_epoch", type=int, default=500)
+    parser.add_argument("--num_epoch", type=int, default=800)
     parser.add_argument("--num_train", type=int, default=4000)
     parser.add_argument("--num_test", type=int, default=4000)
     parser.add_argument("--num_val", type=int, default=0)
@@ -595,7 +603,7 @@ if __name__ == '__main__':
     # plot_vf_err_test(m, Y_test, dyn_sys_info, args.model_type, args.loss_type)
     # plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
     # plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
-    # plot_attractor(m, dyn_sys_info, 50, phase_path)
+    plot_attractor(m, dyn_sys_info, 50, phase_path)
 
     # compute LE
     init = torch.randn(dim)
