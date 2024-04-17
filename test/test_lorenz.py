@@ -70,19 +70,23 @@ class SpectralConv1d(nn.Module):
     # Complex multiplication
     def compl_mul1d(self, input, weights):
         # (batch, in_channel, x ), (in_channel, out_channel, x) -> (batch, out_channel, x)
-        return torch.einsum("bix,iox->box", input, weights)
+        res = torch.einsum("bix,iox->box", input, weights).clone()
+        return res
 
     def forward(self, x):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = torch.fft.rfft(x)
 
-        # Multiply relevant Fourier modes
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1,  device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1] = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        # Multiply relevant Fourier modes without in-place operation
+        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1, device=x.device, dtype=torch.cfloat)
+        out_ft_copy = out_ft.clone()
+        # out_ft_copy[:, :, :self.modes1] = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        before_mode = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        out_ft_copy = torch.cat((before_mode, out_ft_copy[:,:,self.modes1:]), dim = 2)
 
         #Return to physical space
-        x = torch.fft.irfft(out_ft, n=x.size(-1))
+        x = torch.fft.irfft(out_ft_copy, n=x.size(-1))
         return x
 
 class FNO1d(nn.Module):
@@ -159,6 +163,132 @@ class FNO1d(nn.Module):
         return gridx.to(device)
     
 
+# Sobolev norm (HS norm)
+# where we also compare the numerical derivatives between the output and target
+class HsLoss_2d(object):
+    def __init__(self, d=2, p=2, k=1, a=None, group=False, size_average=True, reduction=True):
+        super(HsLoss, self).__init__()
+
+        #Dimension and Lp-norm type are postive
+        assert d > 0 and p > 0
+
+        self.d = d
+        self.p = p
+        self.k = k
+        self.balanced = group
+        self.reduction = reduction
+        self.size_average = size_average
+
+        if a == None:
+            a = [1,] * k
+        self.a = a
+
+    def rel(self, x, y):
+        num_examples = x.size()[0]
+        diff_norms = torch.norm(x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
+        y_norms = torch.norm(y.reshape(num_examples,-1), self.p, 1)
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(diff_norms/y_norms)
+            else:
+                return torch.sum(diff_norms/y_norms)
+        return diff_norms/y_norms
+
+    def __call__(self, x, y, a=None):
+        nx = x.size()[1]
+        ny = x.size()[2]
+        k = self.k
+        balanced = self.balanced
+        a = self.a
+        x = x.view(x.shape[0], nx, ny, -1)
+        y = y.view(y.shape[0], nx, ny, -1)
+
+        k_x = torch.cat((torch.arange(start=0, end=nx//2, step=1),torch.arange(start=-nx//2, end=0, step=1)), 0).reshape(nx,1).repeat(1,ny)
+        k_y = torch.cat((torch.arange(start=0, end=ny//2, step=1),torch.arange(start=-ny//2, end=0, step=1)), 0).reshape(1,ny).repeat(nx,1)
+        k_x = torch.abs(k_x).reshape(1,nx,ny,1).to(x.device)
+        k_y = torch.abs(k_y).reshape(1,nx,ny,1).to(x.device)
+
+        x = torch.fft.fftn(x, dim=[1, 2])
+        y = torch.fft.fftn(y, dim=[1, 2])
+
+        if balanced==False:
+            weight = 1
+            if k >= 1:
+                weight += a[0]**2 * (k_x**2 + k_y**2)
+            if k >= 2:
+                weight += a[1]**2 * (k_x**4 + 2*k_x**2*k_y**2 + k_y**4)
+            weight = torch.sqrt(weight)
+            loss = self.rel(x*weight, y*weight)
+        else:
+            loss = self.rel(x, y)
+            if k >= 1:
+                weight = a[0] * torch.sqrt(k_x**2 + k_y**2)
+                loss += self.rel(x*weight, y*weight)
+            if k >= 2:
+                weight = a[1] * torch.sqrt(k_x**4 + 2*k_x**2*k_y**2 + k_y**4)
+                loss += self.rel(x*weight, y*weight)
+            loss = loss / (k+1)
+
+        return loss
+
+
+## For Lorentz System
+class HsLoss(object):
+    def __init__(self, d=2, p=2, k=1, a=None, size_average=True, reduction=True):
+        super(HsLoss, self).__init__()
+
+        #Dimension and Lp-norm type are postive
+        assert d > 0 and p > 0
+
+        self.d = d
+        self.p = p
+        self.k = k
+        self.reduction = reduction
+        self.size_average = size_average
+
+        if a == None:
+            a = [1,] * k
+        self.a = a
+
+    def rel(self, x, y):
+        num_examples = x.size()[0]
+        diff_norms = torch.norm(x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
+        y_norms = torch.norm(y.reshape(num_examples,-1), self.p, 1)
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(diff_norms/y_norms)
+            else:
+                return torch.sum(diff_norms/y_norms)
+        return diff_norms/y_norms
+
+    def __call__(self, x, y, a=None):
+        nx = x.size()[1]
+        ny = 1
+        k = self.k
+        a = self.a
+        x = x.view(x.shape[0], nx, ny, -1)
+        y = y.view(y.shape[0], nx, ny, -1)
+
+        k_x = torch.tensor([[[[0.]], [[2.]], [[1.]]]], device = x.device)
+        k_y = torch.ones(1,nx,ny,1, device = x.device)
+
+        x = torch.fft.fftn(x, dim=[1, 2])
+        y = torch.fft.fftn(y, dim=[1, 2])
+
+        ## Dissipative regularization
+
+        loss = self.rel(x, y)
+        if k >= 1:
+            weight = a[0] * torch.sqrt(k_x**2 + k_y**2)
+            loss += self.rel(x*weight, y*weight)
+        if k >= 2:
+            weight = a[1] * (k_x**2 + k_y**2)
+            loss += self.rel(x*weight, y*weight)
+        loss = loss / (k+1)
+
+        return loss
+
+
 ##############
 ## Training ##
 ##############
@@ -219,7 +349,7 @@ def update_lr(optimizer, epoch, total_e, origin_lr):
         params['lr'] = new_lr
     return
 
-def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size=10):
+def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, lr, weight_decay, reg_param, loss_type, model_type, batch_size):
 
     print('cuda', torch.cuda.is_available())
     print('memory', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
@@ -237,6 +367,9 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     dyn_sys_type = "lorenz" if dyn_sys == lorenz else "rossler"
     t_eval_point = torch.linspace(0, time_step, 2).to(device)
     torch.cuda.empty_cache()
+    if loss_type == "Sobolev":
+        Soboloev_Loss = HsLoss()
+
 
     # Create minibtach
     x_train = X_train.reshape(num_train,dim,1)
@@ -248,8 +381,6 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
 
     # Training Loop
     min_relative_error = 1000000
-    # y_pred = torch.zeros(int(num_train/batch_size), batch_size, dim)
-    # y_true = torch.zeros(int(num_train/batch_size), batch_size, dim)
 
     for i in range(epochs):
         model.train()
@@ -257,13 +388,14 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
         full_train_loss = 0
 
         for x, y in train_loader:
-            # print("x_shpae", x.shape)
             y_pred = model(x).cuda().view(batch_size, -1)
             y_true = y.view(batch_size, -1)
-            # batch_idx += 1
             
             optimizer.zero_grad()
             train_loss = criterion(y_pred, y_true)  * (1/time_step/time_step)
+            if loss_type == "Sobolev":
+                sob_loss =  Soboloev_Loss(y_pred, y_true)
+                train_loss += sob_loss
             train_loss.backward()
             optimizer.step()
             full_train_loss += train_loss.item()/len(train_loader)
@@ -345,7 +477,15 @@ def plot_attractor(model, dyn_info, time, path):
     dyn, dim, time_step = dyn_info
     tran_orbit = torchdiffeq.odeint(dyn, torch.randn(dim), torch.arange(0, 5, time_step), method='rk4', rtol=1e-8)
     true_o = torchdiffeq.odeint(dyn, tran_orbit[-1], torch.arange(0, time, time_step), method='rk4', rtol=1e-8)
-    learned_o = torchdiffeq.odeint(model.eval().to(device), tran_orbit[-1].to(device), torch.arange(0, time, time_step), method="rk4", rtol=1e-8).detach().cpu().numpy()
+    # learned_o = torchdiffeq.odeint(model.eval().to(device), tran_orbit[-1].to(device), torch.arange(0, time, time_step), method="rk4", rtol=1e-8).detach().cpu().numpy()
+
+    learned_o = torch.zeros(time*int(1/time_step), dim)
+    x0 = tran_orbit[-1]
+    for t in range(time*int(1/time_step)):
+        learned_o[t] = x0
+        new_x = model(x0.reshape(1, dim, 1).cuda())
+        x0 = new_x.squeeze()
+    learned_o = learned_o.detach().cpu().numpy()
 
     # create plot of attractor with initial point starting from 
     fig, axs = subplots(2, 3, figsize=(24,12))
@@ -498,7 +638,7 @@ def rk4(x, f, dt):
     k4 = f(0, x + dt*k3)
     return x + dt/6*(k1 + 2*k2 + 2*k3 + k4)
     
-def lyap_exps(dyn_sys_info, traj, iters, batch_size=10):
+def lyap_exps(dyn_sys_info, traj, iters):
     model, dim, time_step = dyn_sys_info
     LE = torch.zeros(dim).to(device)
     traj_gpu = traj.to(device)
@@ -507,13 +647,14 @@ def lyap_exps(dyn_sys_info, traj, iters, batch_size=10):
         Jac = torch.vmap(torch.func.jacrev(f))(traj_gpu)
     else:
         f = model
-        traj_in_batch = traj_gpu.reshape(-1, batch_size, dim, 1)
+        traj_in_batch = traj_gpu.reshape(-1, 1, dim, 1)
         print("shape", traj_in_batch.shape)
-        Jac = torch.randn(traj_gpu.shape[0], dim, dim)
-        for i in range(traj_in_batch.shape[0]):
-            res = torch.func.jacrev(f)(traj_in_batch[i])
-            print(res, res.shape)
-            Jac[i:i+batch_size-1] = res
+        Jac = torch.randn(traj_gpu.shape[0], dim, dim).cuda()
+        for j in range(traj_in_batch.shape[0]):
+            Jac[j] = torch.autograd.functional.jacobian(f, traj_in_batch[j]).squeeze()
+        # Not possible due to inplace arithmatic in line 82
+        # Jac = torch.vmap(torch.func.jacrev(f))(traj_in_batch)
+
     Q = torch.rand(dim,dim).to(device)
     eye_cuda = torch.eye(dim).to(device)
     for i in range(iters):
@@ -537,18 +678,19 @@ if __name__ == '__main__':
     parser.add_argument("--time_step", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--num_epoch", type=int, default=10)
-    parser.add_argument("--num_train", type=int, default=3000)
-    parser.add_argument("--num_test", type=int, default=1000)
+    parser.add_argument("--num_epoch", type=int, default=500)
+    parser.add_argument("--num_train", type=int, default=5000)
+    parser.add_argument("--num_test", type=int, default=2000)
     parser.add_argument("--num_val", type=int, default=0)
     parser.add_argument("--num_trans", type=int, default=0)
-    parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE"])
+    parser.add_argument("--batch_size", type=int, default=10)
+    parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE", "Sobolev"])
     parser.add_argument("--dyn_sys", default="lorenz", choices=["lorenz", "rossler"])
     parser.add_argument("--model_type", default="MLP_skip", choices=["MLP","MLP_skip", "CNN", "HigherDimCNN", "GRU"])
-    parser.add_argument("--n_hidden", type=int, default=256)
+    parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
+    parser.add_argument("--n_hidden", type=int, default=128)
     parser.add_argument("--n_layers", type=int, default=3)
     parser.add_argument("--reg_param", type=float, default=500)
-    parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
     parser.add_argument("--train_dir", default="../plot/Vector_field/")
 
     # Initialize Settings
@@ -572,11 +714,11 @@ if __name__ == '__main__':
     dataset = create_data(dyn_sys_info, n_train=args.num_train, n_test=args.num_test, n_trans=args.num_trans, n_val=args.num_val)
 
     # Create model
-    m = FNO1d(modes=2, width=32).cuda()
+    m = FNO1d(modes=2, width=args.n_hidden).cuda()
     print("num_param", count_params(m))
 
     print("Training...") # Train the model, return node
-    epochs, loss_hist, test_loss_hist, jac_train_hist, jac_test_hist, Y_test = train(dyn_sys_info, m, device, dataset, args.optim_name, criterion, args.num_epoch, args.lr, args.weight_decay, args.reg_param, args.loss_type, args.model_type)
+    epochs, loss_hist, test_loss_hist, jac_train_hist, jac_test_hist, Y_test = train(dyn_sys_info, m, device, dataset, args.optim_name, criterion, args.num_epoch, args.lr, args.weight_decay, args.reg_param, args.loss_type, args.model_type, args.batch_size)
 
     # Plot Loss
     loss_path = f"../plot/Loss/{args.dyn_sys}/{args.model_type}_{args.loss_type}_Total_{start_time}.png"
@@ -596,22 +738,23 @@ if __name__ == '__main__':
     # plot_vf_err_test(m, Y_test, dyn_sys_info, args.model_type, args.loss_type)
     # plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
     # plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
-    # plot_attractor(m, dyn_sys_info, 50, phase_path)
+    plot_attractor(m, dyn_sys_info, 50, phase_path)
 
     # compute LE
     init = torch.randn(dim)
-    true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 300, args.time_step), method='rk4', rtol=1e-8)
+    true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 50, args.time_step), method='rk4', rtol=1e-8)
     print("Computing LEs of NN...")
-    learned_LE = lyap_exps([m, dim, args.time_step], true_traj, 30000).detach().cpu().numpy()
+    learned_LE = lyap_exps([m, dim, args.time_step], true_traj, true_traj.shape[0]).detach().cpu().numpy()
     print("Computing true LEs...")
-    True_LE = lyap_exps(dyn_sys_info, true_traj, 30000).detach().cpu().numpy()
+    True_LE = lyap_exps(dyn_sys_info, true_traj, true_traj.shape[0]).detach().cpu().numpy()
     loss_hist, test_loss_hist, jac_train_hist, jac_test_hist
 
     logger.info("%s: %s", "Training Loss", str(loss_hist[-1]))
     logger.info("%s: %s", "Test Loss", str(test_loss_hist[-1]))
-    logger.info("%s: %s", "Jacobian term Training Loss", str(jac_train_hist[-1]))
-    logger.info("%s: %s", "Jacobian term Test Loss", str(jac_test_hist[-1]))
+    if args.loss_type == "Jacobian":
+        logger.info("%s: %s", "Jacobian term Training Loss", str(jac_train_hist[-1]))
+        logger.info("%s: %s", "Jacobian term Test Loss", str(jac_test_hist[-1]))
     logger.info("%s: %s", "Learned LE", str(learned_LE))
     logger.info("%s: %s", "True LE", str(True_LE))
-    logger.info("%s: %s", "Relative Error", str(percentage_err))
+    # logger.info("%s: %s", "Relative Error", str(percentage_err))
     print("Learned:", learned_LE, "\n", "True:", True_LE)
