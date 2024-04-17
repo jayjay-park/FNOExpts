@@ -1,0 +1,17 @@
+time_step: 0.01
+lr: 0.001
+weight_decay: 1e-05
+num_epoch: 10
+num_train: 5000
+num_test: 2000
+num_val: 0
+num_trans: 0
+batch_size: 20
+loss_type: MSE
+dyn_sys: lorenz
+model_type: MLP_skip
+optim_name: AdamW
+n_hidden: 64
+n_layers: 3
+reg_param: 500
+train_dir: ../plot/Vector_field/

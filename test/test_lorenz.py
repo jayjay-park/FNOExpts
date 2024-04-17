@@ -70,19 +70,23 @@ class SpectralConv1d(nn.Module):
     # Complex multiplication
     def compl_mul1d(self, input, weights):
         # (batch, in_channel, x ), (in_channel, out_channel, x) -> (batch, out_channel, x)
-        return torch.einsum("bix,iox->box", input, weights)
+        res = torch.einsum("bix,iox->box", input, weights).clone()
+        return res
 
     def forward(self, x):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = torch.fft.rfft(x)
 
-        # Multiply relevant Fourier modes
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1,  device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1] = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        # Multiply relevant Fourier modes without in-place operation
+        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1, device=x.device, dtype=torch.cfloat)
+        out_ft_copy = out_ft.clone()
+        # out_ft_copy[:, :, :self.modes1] = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        before_mode = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        out_ft_copy = torch.cat((before_mode, out_ft_copy[:,:,self.modes1:]), dim = 2)
 
         #Return to physical space
-        x = torch.fft.irfft(out_ft, n=x.size(-1))
+        x = torch.fft.irfft(out_ft_copy, n=x.size(-1))
         return x
 
 class FNO1d(nn.Module):
@@ -158,6 +162,132 @@ class FNO1d(nn.Module):
         gridx = gridx.reshape(1, size_x, 1).repeat([batchsize, 1, 1])
         return gridx.to(device)
     
+
+# Sobolev norm (HS norm)
+# where we also compare the numerical derivatives between the output and target
+class HsLoss_2d(object):
+    def __init__(self, d=2, p=2, k=1, a=None, group=False, size_average=True, reduction=True):
+        super(HsLoss, self).__init__()
+
+        #Dimension and Lp-norm type are postive
+        assert d > 0 and p > 0
+
+        self.d = d
+        self.p = p
+        self.k = k
+        self.balanced = group
+        self.reduction = reduction
+        self.size_average = size_average
+
+        if a == None:
+            a = [1,] * k
+        self.a = a
+
+    def rel(self, x, y):
+        num_examples = x.size()[0]
+        diff_norms = torch.norm(x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
+        y_norms = torch.norm(y.reshape(num_examples,-1), self.p, 1)
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(diff_norms/y_norms)
+            else:
+                return torch.sum(diff_norms/y_norms)
+        return diff_norms/y_norms
+
+    def __call__(self, x, y, a=None):
+        nx = x.size()[1]
+        ny = x.size()[2]
+        k = self.k
+        balanced = self.balanced
+        a = self.a
+        x = x.view(x.shape[0], nx, ny, -1)
+        y = y.view(y.shape[0], nx, ny, -1)
+
+        k_x = torch.cat((torch.arange(start=0, end=nx//2, step=1),torch.arange(start=-nx//2, end=0, step=1)), 0).reshape(nx,1).repeat(1,ny)
+        k_y = torch.cat((torch.arange(start=0, end=ny//2, step=1),torch.arange(start=-ny//2, end=0, step=1)), 0).reshape(1,ny).repeat(nx,1)
+        k_x = torch.abs(k_x).reshape(1,nx,ny,1).to(x.device)
+        k_y = torch.abs(k_y).reshape(1,nx,ny,1).to(x.device)
+
+        x = torch.fft.fftn(x, dim=[1, 2])
+        y = torch.fft.fftn(y, dim=[1, 2])
+
+        if balanced==False:
+            weight = 1
+            if k >= 1:
+                weight += a[0]**2 * (k_x**2 + k_y**2)
+            if k >= 2:
+                weight += a[1]**2 * (k_x**4 + 2*k_x**2*k_y**2 + k_y**4)
+            weight = torch.sqrt(weight)
+            loss = self.rel(x*weight, y*weight)
+        else:
+            loss = self.rel(x, y)
+            if k >= 1:
+                weight = a[0] * torch.sqrt(k_x**2 + k_y**2)
+                loss += self.rel(x*weight, y*weight)
+            if k >= 2:
+                weight = a[1] * torch.sqrt(k_x**4 + 2*k_x**2*k_y**2 + k_y**4)
+                loss += self.rel(x*weight, y*weight)
+            loss = loss / (k+1)
+
+        return loss
+
+
+## For Lorentz System
+class HsLoss(object):
+    def __init__(self, d=2, p=2, k=1, a=None, size_average=True, reduction=True):
+        super(HsLoss, self).__init__()
+
+        #Dimension and Lp-norm type are postive
+        assert d > 0 and p > 0
+
+        self.d = d
+        self.p = p
+        self.k = k
+        self.reduction = reduction
+        self.size_average = size_average
+
+        if a == None:
+            a = [1,] * k
+        self.a = a
+
+    def rel(self, x, y):
+        num_examples = x.size()[0]
+        diff_norms = torch.norm(x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
+        y_norms = torch.norm(y.reshape(num_examples,-1), self.p, 1)
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(diff_norms/y_norms)
+            else:
+                return torch.sum(diff_norms/y_norms)
+        return diff_norms/y_norms
+
+    def __call__(self, x, y, a=None):
+        nx = x.size()[1]
+        ny = 1
+        k = self.k
+        a = self.a
+        x = x.view(x.shape[0], nx, ny, -1)
+        y = y.view(y.shape[0], nx, ny, -1)
+
+        k_x = torch.tensor([[[[0.]], [[2.]], [[1.]]]], device = x.device)
+        k_y = torch.ones(1,nx,ny,1, device = x.device)
+
+        x = torch.fft.fftn(x, dim=[1, 2])
+        y = torch.fft.fftn(y, dim=[1, 2])
+
+        ## Dissipative regularization
+
+        loss = self.rel(x, y)
+        if k >= 1:
+            weight = a[0] * torch.sqrt(k_x**2 + k_y**2)
+            loss += self.rel(x*weight, y*weight)
+        if k >= 2:
+            weight = a[1] * (k_x**2 + k_y**2)
+            loss += self.rel(x*weight, y*weight)
+        loss = loss / (k+1)
+
+        return loss
+
 
 ##############
 ## Training ##
@@ -237,6 +367,9 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     dyn_sys_type = "lorenz" if dyn_sys == lorenz else "rossler"
     t_eval_point = torch.linspace(0, time_step, 2).to(device)
     torch.cuda.empty_cache()
+    if loss_type == "Sobolev":
+        Soboloev_Loss = HsLoss()
+
 
     # Create minibtach
     x_train = X_train.reshape(num_train,dim,1)
@@ -260,6 +393,9 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
             
             optimizer.zero_grad()
             train_loss = criterion(y_pred, y_true)  * (1/time_step/time_step)
+            if loss_type == "Sobolev":
+                sob_loss =  Soboloev_Loss(y_pred, y_true)
+                train_loss += sob_loss
             train_loss.backward()
             optimizer.step()
             full_train_loss += train_loss.item()/len(train_loader)
@@ -542,19 +678,19 @@ if __name__ == '__main__':
     parser.add_argument("--time_step", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--num_epoch", type=int, default=1000)
-    parser.add_argument("--num_train", type=int, default=2000)
+    parser.add_argument("--num_epoch", type=int, default=500)
+    parser.add_argument("--num_train", type=int, default=5000)
     parser.add_argument("--num_test", type=int, default=2000)
     parser.add_argument("--num_val", type=int, default=0)
     parser.add_argument("--num_trans", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=200)
-    parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE"])
+    parser.add_argument("--batch_size", type=int, default=10)
+    parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE", "Sobolev"])
     parser.add_argument("--dyn_sys", default="lorenz", choices=["lorenz", "rossler"])
     parser.add_argument("--model_type", default="MLP_skip", choices=["MLP","MLP_skip", "CNN", "HigherDimCNN", "GRU"])
+    parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
     parser.add_argument("--n_hidden", type=int, default=128)
     parser.add_argument("--n_layers", type=int, default=3)
     parser.add_argument("--reg_param", type=float, default=500)
-    parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
     parser.add_argument("--train_dir", default="../plot/Vector_field/")
 
     # Initialize Settings
@@ -606,11 +742,11 @@ if __name__ == '__main__':
 
     # compute LE
     init = torch.randn(dim)
-    true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 300, args.time_step), method='rk4', rtol=1e-8)
+    true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 50, args.time_step), method='rk4', rtol=1e-8)
     print("Computing LEs of NN...")
-    learned_LE = lyap_exps([m, dim, args.time_step], true_traj, 30000).detach().cpu().numpy()
+    learned_LE = lyap_exps([m, dim, args.time_step], true_traj, true_traj.shape[0]).detach().cpu().numpy()
     print("Computing true LEs...")
-    True_LE = lyap_exps(dyn_sys_info, true_traj, 30000).detach().cpu().numpy()
+    True_LE = lyap_exps(dyn_sys_info, true_traj, true_traj.shape[0]).detach().cpu().numpy()
     loss_hist, test_loss_hist, jac_train_hist, jac_test_hist
 
     logger.info("%s: %s", "Training Loss", str(loss_hist[-1]))
