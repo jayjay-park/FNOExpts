@@ -301,6 +301,8 @@ def count_params(model):
                     list(p.size()+(2,) if p.is_complex() else p.size()))
     return c
 
+
+
 def create_data(dyn_info, n_train, n_test, n_val, n_trans):
     dyn, dim, time_step = dyn_info
     # Adjust total time to account for the validation set
@@ -356,7 +358,7 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
     torch.autograd.set_detect_anomaly(True)
 
     # Initialize
-    n_store, k  = 10, 0
+    n_store, k  = 5, 0
     ep_num, loss_hist, test_loss_hist = torch.empty(n_store+1,dtype=int), torch.empty(n_store+1), torch.empty(n_store+1)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -392,10 +394,10 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
             y_true = y.view(batch_size, -1)
             
             optimizer.zero_grad()
-            train_loss = criterion(y_pred, y_true)  * (1/time_step/time_step)
             if loss_type == "Sobolev":
-                sob_loss =  Soboloev_Loss(y_pred, y_true)
-                train_loss += sob_loss
+                train_loss =  Soboloev_Loss(y_pred, y_true)
+            else:
+                train_loss = criterion(y_pred, y_true)
             train_loss.backward()
             optimizer.step()
             full_train_loss += train_loss.item()/len(train_loader)
@@ -417,11 +419,11 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
 
                 # current_relative_error = calculate_relative_error(model, dyn_sys_info[0], device)
                 # Check if current model has the lowest relative error so far
-                test_loss = criterion(y_pred_test.view(batch_size, -1), y_true_test.view(batch_size, -1)) * (1/time_step/time_step)
+                test_loss = criterion(y_pred_test.view(batch_size, -1), y_true_test.view(batch_size, -1))
                 if test_loss < min_relative_error:
                     min_relative_error = test_loss
                     # Save the model
-                    torch.save(model.state_dict(), f"{args.train_dir}/best_model.pth")
+                    torch.save(model.state_dict(), f"{args.train_dir}/best_model_{loss_type}.pth")
                     logger.info(f"Epoch {i}: New minimal relative error: {min_relative_error:.2f}%, model saved.")
 
                 # save predicted node feature for analysis            
@@ -448,7 +450,7 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
         jac_diff_train, jac_diff_test = None, None
     # Load the best relative error model
     best_model = model
-    best_model.load_state_dict(torch.load(f"{args.train_dir}/best_model.pth"))
+    best_model.load_state_dict(torch.load(f"{args.train_dir}/best_model_{loss_type}.pth"))
     best_model.eval()
     RE_plot_path = f'{args.train_dir}minRE.jpg'
     # plot_vector_field(best_model, path=RE_plot_path, idx=1, t=0., N=100, device='cuda')
@@ -477,7 +479,6 @@ def plot_attractor(model, dyn_info, time, path):
     dyn, dim, time_step = dyn_info
     tran_orbit = torchdiffeq.odeint(dyn, torch.randn(dim), torch.arange(0, 5, time_step), method='rk4', rtol=1e-8)
     true_o = torchdiffeq.odeint(dyn, tran_orbit[-1], torch.arange(0, time, time_step), method='rk4', rtol=1e-8)
-    # learned_o = torchdiffeq.odeint(model.eval().to(device), tran_orbit[-1].to(device), torch.arange(0, time, time_step), method="rk4", rtol=1e-8).detach().cpu().numpy()
 
     learned_o = torch.zeros(time*int(1/time_step), dim)
     x0 = tran_orbit[-1]
@@ -727,6 +728,7 @@ if __name__ == '__main__':
     true_plot_path_1 = f"../plot/Vector_field/True_{args.dyn_sys}_1.png"
     true_plot_path_2 = f"../plot/Vector_field/True_{args.dyn_sys}_2.png"
     phase_path = f"../plot/Phase_plot/{args.dyn_sys}_{args.model_type}_{args.loss_type}.png"
+    diff_path = f"../plot/Phase_plot/{args.dyn_sys}_{args.model_type}_{args.loss_type}_diff.png"
 
     plot_loss(epochs, loss_hist, test_loss_hist, loss_path) 
     if args.loss_type == "Jacobian":
@@ -738,16 +740,36 @@ if __name__ == '__main__':
     # plot_vf_err_test(m, Y_test, dyn_sys_info, args.model_type, args.loss_type)
     # plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
     # plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
-    plot_attractor(m, dyn_sys_info, 50, phase_path)
+    print("Creating plot...")
+    plot_attractor(m, dyn_sys_info, 40, phase_path)
 
     # compute LE
     init = torch.randn(dim)
     true_traj = torchdiffeq.odeint(dyn_sys_func, torch.randn(dim), torch.arange(0, 50, args.time_step), method='rk4', rtol=1e-8)
+
+    init_point = torch.randn(dim)
+    learned_traj = torch.empty_like(true_traj).cuda()
+    learned_traj[0] = init_point
+    for i in range(1, len(learned_traj)):
+        learned_traj[i] = m(learned_traj[i-1].reshape(1, dim, 1).cuda()).reshape(dim,)
+    
+    print("Saving diff plot...")
+    fig = figure()
+    print("true_traj device:", true_traj.device)
+    print("learned_traj device:", learned_traj.device)
+
+    plot([i for i in range(len(true_traj))], torch.abs(true_traj - learned_traj.detach().cpu().numpy())) ## plot for both MSE and Sobolov
+    savefig(diff_path, format='jpg', dpi=400, bbox_inches ='tight', pad_inches = 0.1)
     print("Computing LEs of NN...")
-    learned_LE = lyap_exps([m, dim, args.time_step], true_traj, true_traj.shape[0]).detach().cpu().numpy()
+    learned_LE = lyap_exps([m, dim, args.time_step], learned_traj, true_traj.shape[0]).detach().cpu().numpy()
     print("Computing true LEs...")
     True_LE = lyap_exps(dyn_sys_info, true_traj, true_traj.shape[0]).detach().cpu().numpy()
     loss_hist, test_loss_hist, jac_train_hist, jac_test_hist
+    print("Computing rest of metrics...")
+    True_mean = torch.mean(true_traj, dim = 1)
+    Learned_mean = torch.mean(learned_traj, dim = 1)
+    True_var = torch.var(true_traj, dim = 1)
+    Learned_var = torch.var(learned_traj, dim=1)
 
     logger.info("%s: %s", "Training Loss", str(loss_hist[-1]))
     logger.info("%s: %s", "Test Loss", str(test_loss_hist[-1]))
@@ -756,5 +778,9 @@ if __name__ == '__main__':
         logger.info("%s: %s", "Jacobian term Test Loss", str(jac_test_hist[-1]))
     logger.info("%s: %s", "Learned LE", str(learned_LE))
     logger.info("%s: %s", "True LE", str(True_LE))
+    logger.info("%s: %s", "Learned mean", str(Learned_mean))
+    logger.info("%s: %s", "True mean", str(True_mean))
+    logger.info("%s: %s", "Learned variance", str(Learned_var))
+    logger.info("%s: %s", "True variance", str(True_var))
     # logger.info("%s: %s", "Relative Error", str(percentage_err))
     print("Learned:", learned_LE, "\n", "True:", True_LE)
