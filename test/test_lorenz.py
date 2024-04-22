@@ -394,10 +394,9 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
             y_true = y.view(batch_size, -1)
             
             optimizer.zero_grad()
+            train_loss = criterion(y_pred, y_true)
             if loss_type == "Sobolev":
-                train_loss =  Soboloev_Loss(y_pred, y_true)
-            else:
-                train_loss = criterion(y_pred, y_true)
+                train_loss +=  Soboloev_Loss(y_pred, y_true)                
             train_loss.backward()
             optimizer.step()
             full_train_loss += train_loss.item()/len(train_loader)
@@ -425,7 +424,7 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
                     # Save the model
                     torch.save(model.state_dict(), f"{args.train_dir}/best_model_{loss_type}.pth")
                     logger.info(f"Epoch {i}: New minimal relative error: {min_relative_error:.2f}%, model saved.")
-
+                
                 # save predicted node feature for analysis            
                 logger.info("Epoch: %d Train: %.5f Test: %.5f", i, full_train_loss, test_loss.item())
                 ep_num[k], loss_hist[k], test_loss_hist[k] = i, full_train_loss, test_loss.item()
@@ -439,6 +438,7 @@ def train(dyn_sys_info, model, device, dataset, optim_name, criterion, epochs, l
                     # plot_vector_field(model, path=JAC_plot_path, idx=1, t=0., N=100, device='cuda')
 
                 k = k + 1
+                
 
     if loss_type == "Jacobian":
         for i in [0, 1, 50, -2, -1]:
@@ -639,7 +639,7 @@ def rk4(x, f, dt):
     k4 = f(0, x + dt*k3)
     return x + dt/6*(k1 + 2*k2 + 2*k3 + k4)
     
-def lyap_exps(dyn_sys_info, traj, iters):
+def lyap_exps(dyn_sys_info, ds_name, traj, iters):
     model, dim, time_step = dyn_sys_info
     LE = torch.zeros(dim).to(device)
     traj_gpu = traj.to(device)
@@ -667,6 +667,26 @@ def lyap_exps(dyn_sys_info, traj, iters):
     return LE/iters/time_step
 
 
+def plot_loss_MSE(MSE_train, MSE_test, model_name):
+    fig, axs = subplots(1, figsize=(24, 12)) #, sharey=True
+    
+    colors = cm.tab20b(np.linspace(0, 1, 20))
+
+    # Training Loss
+    x = np.arange(0, MSE_train.shape[0])
+    axs.plot(x, MSE_train, c=colors[15], label='Train Loss', alpha=0.9, linewidth=5)
+    axs.plot(x, MSE_test, c=colors[1], label='Test Loss', alpha=0.9, linewidth=5)
+    axs.grid(True)
+    axs.legend(loc='best', fontsize=48)
+    # axs.set_ylabel(r'$\mathcal{L}$', fontsize=24)
+    axs.set_xlabel('Epochs', fontsize=48)
+    axs.tick_params(labelsize=48)
+
+    tight_layout()
+    savefig('../plot/loss_behavior'+str(model_name)+ '.png', format='png', dpi=600, bbox_inches ='tight', pad_inches = 0.1)
+
+    return
+
 if __name__ == '__main__':
 
     # Set device
@@ -681,11 +701,11 @@ if __name__ == '__main__':
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--num_epoch", type=int, default=500)
     parser.add_argument("--num_train", type=int, default=5000)
-    parser.add_argument("--num_test", type=int, default=2000)
+    parser.add_argument("--num_test", type=int, default=1000)
     parser.add_argument("--num_val", type=int, default=0)
     parser.add_argument("--num_trans", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=10)
-    parser.add_argument("--loss_type", default="MSE", choices=["Jacobian", "MSE", "Sobolev"])
+    parser.add_argument("--loss_type", default="Sobolev", choices=["Jacobian", "MSE", "Sobolev"])
     parser.add_argument("--dyn_sys", default="lorenz", choices=["lorenz", "rossler"])
     parser.add_argument("--model_type", default="MLP_skip", choices=["MLP","MLP_skip", "CNN", "HigherDimCNN", "GRU"])
     parser.add_argument("--optim_name", default="AdamW", choices=["AdamW", "Adam", "RMSprop", "SGD"])
@@ -741,7 +761,7 @@ if __name__ == '__main__':
     # plot_vector_field(dyn_sys_func, path=true_plot_path_1, idx=1, t=0., N=100, device='cuda')
     # plot_vector_field(dyn_sys_func, path=true_plot_path_2, idx=2, t=0., N=100, device='cuda')
     print("Creating plot...")
-    plot_attractor(m, dyn_sys_info, 40, phase_path)
+    plot_attractor(m, dyn_sys_info, 50, phase_path)
 
     # compute LE
     init = torch.randn(dim)
@@ -761,15 +781,15 @@ if __name__ == '__main__':
     plot([i for i in range(len(true_traj))], torch.abs(true_traj - learned_traj.detach().cpu().numpy())) ## plot for both MSE and Sobolov
     savefig(diff_path, format='jpg', dpi=400, bbox_inches ='tight', pad_inches = 0.1)
     print("Computing LEs of NN...")
-    learned_LE = lyap_exps([m, dim, args.time_step], learned_traj, true_traj.shape[0]).detach().cpu().numpy()
+    learned_LE = lyap_exps([m, dim, args.time_step], args.dyn_sys, learned_traj, true_traj.shape[0]).detach().cpu().numpy()
     print("Computing true LEs...")
-    True_LE = lyap_exps(dyn_sys_info, true_traj, true_traj.shape[0]).detach().cpu().numpy()
+    True_LE = lyap_exps(dyn_sys_info, args.dyn_sys, true_traj, true_traj.shape[0]).detach().cpu().numpy()
     loss_hist, test_loss_hist, jac_train_hist, jac_test_hist
     print("Computing rest of metrics...")
-    True_mean = torch.mean(true_traj, dim = 1)
-    Learned_mean = torch.mean(learned_traj, dim = 1)
-    True_var = torch.var(true_traj, dim = 1)
-    Learned_var = torch.var(learned_traj, dim=1)
+    True_mean = torch.mean(true_traj, dim = 0)
+    Learned_mean = torch.mean(learned_traj, dim = 0)
+    True_var = torch.var(true_traj, dim = 0)
+    Learned_var = torch.var(learned_traj, dim=0)
 
     logger.info("%s: %s", "Training Loss", str(loss_hist[-1]))
     logger.info("%s: %s", "Test Loss", str(test_loss_hist[-1]))
@@ -784,3 +804,7 @@ if __name__ == '__main__':
     logger.info("%s: %s", "True variance", str(True_var))
     # logger.info("%s: %s", "Relative Error", str(percentage_err))
     print("Learned:", learned_LE, "\n", "True:", True_LE)
+
+    plot_loss_MSE(loss_hist, test_loss_hist, args.loss_type)
+
+

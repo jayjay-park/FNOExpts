@@ -1,0 +1,36 @@
+time_step: 0.01
+lr: 0.001
+weight_decay: 1e-05
+num_epoch: 500
+num_train: 5000
+num_test: 1000
+num_val: 0
+num_trans: 0
+batch_size: 10
+loss_type: MSE
+dyn_sys: lorenz
+model_type: MLP_skip
+optim_name: AdamW
+n_hidden: 128
+n_layers: 3
+reg_param: 500
+train_dir: ../plot/Vector_field/
+Epoch 0: New minimal relative error: 0.33%, model saved.
+Epoch: 0 Train: 3.41956 Test: 0.33074
+Epoch 100: New minimal relative error: 0.00%, model saved.
+Epoch: 100 Train: 0.00947 Test: 0.00323
+Epoch 200: New minimal relative error: 0.00%, model saved.
+Epoch: 200 Train: 0.00554 Test: 0.00212
+Epoch 300: New minimal relative error: 0.00%, model saved.
+Epoch: 300 Train: 0.00082 Test: 0.00100
+Epoch 400: New minimal relative error: 0.00%, model saved.
+Epoch: 400 Train: 0.00054 Test: 0.00014
+Epoch: 499 Train: 0.00026 Test: 0.00021
+Training Loss: tensor(0.0003)
+Test Loss: tensor(0.0002)
+Learned LE: [  0.97278905  -0.18740587 -16.629679  ]
+True LE: [ 7.4157292e-01  1.1452072e-04 -1.4449540e+01]
+Learned mean: tensor([-0.6312, -0.6233, 23.3407], device='cuda:0', grad_fn=<MeanBackward1>)
+True mean: tensor([-1.6414, -1.6663, 24.1288])
+Learned variance: tensor([61.7619, 82.0878, 79.5908], device='cuda:0', grad_fn=<VarBackward0>)
+True variance: tensor([62.1465, 77.2169, 65.5227])
